@@ -1,3 +1,7 @@
+from langchain.schema import AgentAction, AgentFinish, LLMResult
+from langchain.callbacks.base import BaseCallbackHandler
+from typing import Any, Dict, List, Union
+import sys
 import time
 from flask import Flask, Response, request
 from flask_cors import CORS
@@ -12,16 +16,11 @@ from pathlib import Path
 import os
 
 # enable logging of llama_index
-# import logging
-# logging.getLogger().setLevel(logging.DEBUG)
+import logging
+logging.getLogger().setLevel(logging.DEBUG)
 
 
 """Callback Handler streams to stdout on new llm token."""
-import sys
-from typing import Any, Dict, List, Union
-
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.schema import AgentAction, AgentFinish, LLMResult
 
 
 class CustomCallBackHandler(BaseCallbackHandler):
@@ -100,7 +99,7 @@ def home():
     return 'Hello, World!'
 
 
-openai_key = "YOUR KEY HERE"
+openai_key = "YOUR_KEY_HERE"
 
 print("key")
 print(openai_key)
@@ -122,7 +121,7 @@ max_chunk_overlap = 20
 prompt_helper = PromptHelper(
     max_input_size, num_output, max_chunk_overlap)
 service_context = ServiceContext.from_defaults(
-    llm_predictor=llm_predictor, prompt_helper=prompt_helper)
+    llm_predictor=llm_predictor, prompt_helper=prompt_helper, chunk_size_limit=2000)
 
 
 def gen_index(document, sc):
@@ -146,13 +145,26 @@ def gen_index(document, sc):
     return index
 
 
-def getQAPrompt():
+def getQAPrompt2():
     QUESTION_ANSWER_PROMPT_TMPL = (
-        "Context information is below. \n"
+        "Context information is below. This is a meeting transcript.\n"
         "---------------------\n"
         "{context_str}"
         "\n---------------------\n"
+        "According to context above to answer following questions\n"
         "{query_str}\n")
+    QUESTION_ANSWER_PROMPT = QuestionAnswerPrompt(QUESTION_ANSWER_PROMPT_TMPL)
+    return QUESTION_ANSWER_PROMPT
+
+
+def getQAPrompt():
+    QUESTION_ANSWER_PROMPT_TMPL = (
+        "The text below is a meeting transcript, {query_str}\n\n"
+        "Text: \"\"\""
+        "{context_str}"
+        "\n"
+        "\"\"\""
+    )
     QUESTION_ANSWER_PROMPT = QuestionAnswerPrompt(QUESTION_ANSWER_PROMPT_TMPL)
     return QUESTION_ANSWER_PROMPT
 
@@ -173,7 +185,7 @@ def query():
     start_time = time.time()
     print("query start @ {}".format(start_time))
 
-    response = index.query(prompt + " 请使用中文回答。",
+    response = index.query(prompt + " respond in Chinese.",
                            text_qa_template=getQAPrompt(), response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=service_context, use_async=True)
 
     end_time = time.time()
@@ -201,7 +213,7 @@ def stream():
     index = gen_index(context, sc)
 
     def query():
-        resp = index.query(prompt + " 请使用中文回答。",
+        resp = index.query(prompt + " respond in Chinese.",
                            text_qa_template=getQAPrompt(), response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=sc, use_async=True)
         q.put("[END]")
         print(resp)
@@ -228,6 +240,13 @@ def add_index():
     id = request.json.get('id')
     context = request.json.get('context')
 
+    # adding space every 100 characters for context
+    context = '\n'.join([context[i:i+10]
+                         for i in range(0, len(context), 10)])
+
+    app.logger.info(id)
+    app.logger.info(context)
+
     index_file = os.path.join(Path('./data'), Path(id))
 
     if os.path.exists(index_file):
@@ -253,14 +272,18 @@ def query_index():
     id = request.json.get('id')
     prompt = request.json.get('prompt')
 
+    app.logger.info(id)
+    app.logger.info(prompt)
+
     index_file = os.path.join(Path('./data'), Path(id))
     if os.path.exists(index_file):
         mutex.acquire(timeout=10)
         index = GPTSimpleVectorIndex.load_from_disk(
             index_file, service_context=service_context)
         mutex.release()
-        response = index.query(prompt + " 请使用中文回答。",
-                               text_qa_template=getQAPrompt(), response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=service_context, use_async=True)
+        response = index.query(prompt + " respond in Chinese.",
+                               text_qa_template=getQAPrompt(), similarity_top_k=15, response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=service_context, use_async=True)
+        print(response)
         return str(response), 200
     else:
         return "index not found", 404
@@ -271,6 +294,10 @@ def stream_index():
     q = Queue()
     id = request.json.get('id')
     prompt = request.json.get('prompt')
+
+    app.logger.info(id)
+    app.logger.info(prompt)
+
     cm = ChatOpenAI(
         streaming=True,
         openai_api_key=openai_key,
@@ -289,8 +316,8 @@ def stream_index():
         mutex.release()
 
         def query():
-            resp = index.query(prompt + " 请使用中文回答。",
-                               text_qa_template=getQAPrompt(), response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=sc, use_async=True)
+            resp = index.query(prompt + " respond in Chinese.",
+                               text_qa_template=getQAPrompt(), similarity_top_k=10, response_mode="tree_summarize", mode=QueryMode.EMBEDDING, service_context=sc, use_async=True)
             q.put("[END]")
             print(resp)
 
@@ -313,4 +340,3 @@ def stream_index():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5601)
-
